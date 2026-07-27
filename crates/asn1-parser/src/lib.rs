@@ -119,6 +119,76 @@ mod tests {
     }
 
     #[test]
+    fn object_identifier_value_assignment() {
+        let m = parse_str(
+            r#"Foo DEFINITIONS ::= BEGIN
+                uicFcb OBJECT IDENTIFIER ::= { iso(1) identified-organization(3) dod(6) }
+                uicFcbModules OBJECT IDENTIFIER ::= { uicFcb modules(0) }
+                headerV1 OBJECT IDENTIFIER ::= { uicFcbModules header(1) v1(1) 0 }
+            END"#,
+        );
+        assert_eq!(m.assignments.len(), 3);
+        for a in &m.assignments {
+            let AssignmentKind::Value { ty, value } = &a.kind else {
+                panic!("expected value assignment for {}", a.name.value);
+            };
+            assert!(matches!(ty.kind, TypeKind::ObjectIdentifier));
+            assert!(matches!(value, Value::Oid(_)), "expected OID value for {}", a.name.value);
+        }
+        let AssignmentKind::Value { value: Value::Oid(parts), .. } = &m.assignments[2].kind else {
+            unreachable!()
+        };
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0].name.as_ref().unwrap().value, "uicFcbModules");
+        assert_eq!(parts[0].value, None);
+        assert_eq!(parts[1].name.as_ref().unwrap().value, "header");
+        assert_eq!(parts[1].value, Some(1));
+        assert_eq!((parts[3].name.is_none(), parts[3].value), (true, Some(0)));
+    }
+
+    #[test]
+    fn multi_word_and_constrained_value_assignment_types() {
+        let m = parse_str(
+            r#"Foo DEFINITIONS ::= BEGIN
+                key OCTET STRING ::= '00FF'H
+                flags BIT STRING ::= '1010'B
+                limit INTEGER (0..10) ::= 7
+                names SEQUENCE OF IA5String ::= { "a", "b" }
+            END"#,
+        );
+        assert_eq!(m.assignments.len(), 4);
+        let kinds: Vec<_> = m
+            .assignments
+            .iter()
+            .map(|a| match &a.kind {
+                AssignmentKind::Value { ty, .. } => &ty.kind,
+                _ => panic!("expected value assignment for {}", a.name.value),
+            })
+            .collect();
+        assert!(matches!(kinds[0], TypeKind::OctetString));
+        assert!(matches!(kinds[1], TypeKind::BitString { .. }));
+        assert!(matches!(kinds[2], TypeKind::Integer { .. }));
+        assert!(matches!(kinds[3], TypeKind::SequenceOf(_)));
+        let AssignmentKind::Value { ty, .. } = &m.assignments[2].kind else { unreachable!() };
+        assert!(matches!(ty.constraints.as_slice(), [Constraint::ValueRange { .. }]));
+    }
+
+    #[test]
+    fn object_set_assignment_still_recognized() {
+        let m = parse_str(
+            r#"Foo DEFINITIONS ::= BEGIN
+                Blocks BLOCK-TYPE ::= { { Alpha IDENTIFIED BY alphaId }, ... }
+            END"#,
+        );
+        let AssignmentKind::ObjectSet { class_name, set } = &m.assignments[0].kind else {
+            panic!("expected object-set assignment");
+        };
+        assert_eq!(class_name.value, "BLOCK-TYPE");
+        assert_eq!(set.elements.len(), 1);
+        assert!(set.extensible);
+    }
+
+    #[test]
     fn imports_parsed() {
         let m = parse_str(
             r#"Foo DEFINITIONS AUTOMATIC TAGS ::= BEGIN

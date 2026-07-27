@@ -380,29 +380,32 @@ impl Parser {
             });
         }
 
-        let class_or_type = self.expect_any_ident()?;
+        // `name Type ::= Value` (or an object / object-set assignment). The governing
+        // type may be more than a bare reference — `OBJECT IDENTIFIER`, `BIT STRING`,
+        // `SEQUENCE OF T`, `INTEGER {a(1)}`, or a constrained type — so parse a full
+        // type here rather than a single identifier.
+        let ty = self.parse_type()?;
         self.expect_kind(&TokKind::Assign, "`::=`")?;
 
         if matches!(self.peek().kind, TokKind::LBrace)
             && matches!(self.peek_at(1).kind, TokKind::LBrace | TokKind::Ellipsis)
         {
-            let set = self.parse_object_set_body()?;
-            let end = self.prev_span();
-            return Ok(Assignment {
-                doc,
-                name,
-                kind: AssignmentKind::ObjectSet { class_name: class_or_type, set },
-                span: start.join(end),
-            });
+            if let TypeKind::Reference(class_or_type) = &ty.kind {
+                if ty.constraints.is_empty() && ty.tag.is_none() {
+                    let class_name = class_or_type.clone();
+                    let set = self.parse_object_set_body()?;
+                    let end = self.prev_span();
+                    return Ok(Assignment {
+                        doc,
+                        name,
+                        kind: AssignmentKind::ObjectSet { class_name, set },
+                        span: start.join(end),
+                    });
+                }
+            }
         }
 
-        let ty = Type {
-            kind: TypeKind::Reference(class_or_type),
-            constraints: Vec::new(),
-            tag: None,
-            span: name.span,
-        };
-        let value = self.parse_value()?;
+        let value = self.parse_value_for_type(&ty)?;
         let end = self.prev_span();
         Ok(Assignment {
             doc,
@@ -728,8 +731,7 @@ impl Parser {
                             .parse::<i64>()
                             .map_err(|_| ParseError::new("bad enum value", span))?
                     } else {
-                        n.parse::<i64>()
-                            .map_err(|_| ParseError::new("bad enum value", span))?
+                        n.parse::<i64>().map_err(|_| ParseError::new("bad enum value", span))?
                     };
                     self.bump();
                     Some(v)
@@ -1193,6 +1195,21 @@ impl Parser {
     // Values
     // ---------------------------------------------------------------------
 
+    /// Parses a value whose governing type is known.
+    ///
+    /// `{ a(1) b(2) }` is syntactically identical to a record value, so the declared
+    /// type is what settles it: for `OBJECT IDENTIFIER` / `RELATIVE-OID` the braces
+    /// always hold an OID component list.
+    fn parse_value_for_type(&mut self, ty: &Type) -> Result<Value, ParseError> {
+        if matches!(ty.kind, TypeKind::ObjectIdentifier | TypeKind::RelativeOid)
+            && matches!(self.peek().kind, TokKind::LBrace)
+        {
+            self.bump();
+            return self.parse_oid_value_body();
+        }
+        self.parse_value()
+    }
+
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         match &self.peek().kind {
             TokKind::Number(_) | TokKind::Hyphen => {
@@ -1211,13 +1228,10 @@ impl Parser {
                             // Try parsing with a leading minus sign.
                             format!("-{}", n)
                                 .parse::<i64>()
-                                .map_err(|_| {
-                                    ParseError::new("bad integer literal", span)
-                                })?
+                                .map_err(|_| ParseError::new("bad integer literal", span))?
                         } else {
-                            n.parse::<i64>().map_err(|_| {
-                                ParseError::new("bad integer literal", span)
-                            })?
+                            n.parse::<i64>()
+                                .map_err(|_| ParseError::new("bad integer literal", span))?
                         };
                         self.bump();
                         Ok(Value::Integer(v))
@@ -1306,6 +1320,14 @@ impl Parser {
                 || matches!(self.peek().kind, TokKind::RBrace)
             {
                 // OID-style component: "name (n)" or just "name"
+                self.pos = save;
+                return self.parse_oid_value_body();
+            }
+            if matches!(self.peek().kind, TokKind::Ident(_))
+                && matches!(self.peek_at(1).kind, TokKind::LParen)
+            {
+                // `{ root arc(n) ... }` — a record value cannot have `(` after a field
+                // value, so a named arc here means this is an OID.
                 self.pos = save;
                 return self.parse_oid_value_body();
             }
