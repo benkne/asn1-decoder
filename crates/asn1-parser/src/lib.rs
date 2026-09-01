@@ -189,6 +189,41 @@ mod tests {
     }
 
     #[test]
+    fn object_set_union_separator_accepted() {
+        let m = parse_str(
+            r#"Foo DEFINITIONS ::= BEGIN
+                Blocks BLOCK-TYPE ::= {
+                    { Alpha IDENTIFIED BY alphaId } |
+                    { Beta IDENTIFIED BY betaId } |
+                    { NULL IDENTIFIED BY dummyId },
+                    ...
+                }
+            END"#,
+        );
+        let AssignmentKind::ObjectSet { set, .. } = &m.assignments[0].kind else {
+            panic!("expected object-set assignment");
+        };
+        assert_eq!(set.elements.len(), 3);
+        assert!(set.extensible);
+    }
+
+    #[test]
+    fn unsigned_64_bit_range_bounds_accepted() {
+        let m = parse_str(
+            r#"Foo DEFINITIONS ::= BEGIN
+                UInt64 ::= INTEGER(0..18446744073709551615)
+            END"#,
+        );
+        let AssignmentKind::Type(ty) = &m.assignments[0].kind else {
+            panic!("expected type assignment");
+        };
+        let [Constraint::ValueRange { upper, .. }] = ty.constraints.as_slice() else {
+            panic!("expected a value range constraint");
+        };
+        assert!(matches!(upper, ValueBound::Value(Value::Integer(18446744073709551615))));
+    }
+
+    #[test]
     fn imports_parsed() {
         let m = parse_str(
             r#"Foo DEFINITIONS AUTOMATIC TAGS ::= BEGIN

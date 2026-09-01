@@ -355,21 +355,21 @@ fn cpp_type_for(ty: &IrType, resolver: &NamespaceResolver<'_>, current_module: &
 fn integer_cpp_type(cs: &[IrConstraint]) -> &'static str {
     for c in cs {
         if let IrConstraint::Range { lower, upper, .. } = c {
-            let lo = lower.unwrap_or(i64::MIN);
-            let hi = upper.unwrap_or(i64::MAX);
+            let lo = lower.unwrap_or(i64::MIN as i128);
+            let hi = upper.unwrap_or(i64::MAX as i128);
             if lo >= 0 {
-                if hi <= u8::MAX as i64 {
+                if hi <= u8::MAX as i128 {
                     return "std::uint8_t";
                 }
-                if hi <= u16::MAX as i64 {
+                if hi <= u16::MAX as i128 {
                     return "std::uint16_t";
                 }
-                if hi <= u32::MAX as i64 {
+                if hi <= u32::MAX as i128 {
                     return "std::uint32_t";
                 }
                 return "std::uint64_t";
             }
-            if lo >= i32::MIN as i64 && hi <= i32::MAX as i64 {
+            if lo >= i32::MIN as i128 && hi <= i32::MAX as i128 {
                 return "std::int32_t";
             }
         }

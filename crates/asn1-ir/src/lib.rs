@@ -124,13 +124,13 @@ pub enum IrObjectFieldValue {
 pub enum IrType {
     Boolean,
     Integer {
-        named_numbers: Vec<(String, i64)>,
+        named_numbers: Vec<(String, i128)>,
         constraints: Vec<IrConstraint>,
     },
     Real,
     Null,
     BitString {
-        named_bits: Vec<(String, i64)>,
+        named_bits: Vec<(String, i128)>,
         constraints: Vec<IrConstraint>,
     },
     OctetString {
@@ -195,7 +195,7 @@ pub enum IrCharKind {
 pub struct IrEnumItem {
     pub doc: Option<String>,
     pub name: String,
-    pub value: Option<i64>,
+    pub value: Option<i128>,
     pub is_extension: bool,
 }
 
@@ -245,7 +245,7 @@ pub struct IrChoice {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum IrConstraint {
     /// Inclusive `[lower, upper]`, either bound may be open (`None` means MIN/MAX).
-    Range { lower: Option<i64>, upper: Option<i64>, extensible: bool },
+    Range { lower: Option<i128>, upper: Option<i128>, extensible: bool },
     /// A single permitted value, rendered as a string.
     Single(String),
     /// A SIZE constraint — the inner constraint describes the size range.
@@ -287,7 +287,9 @@ fn lower_module<'a>(m: &'a cst::Module, resolver: &mut Resolver<'a>) -> IrModule
             .iter()
             .map(|i| IrImport {
                 symbols: i.symbols.iter().map(|s| s.value.clone()).collect(),
-                from_module: i.from_module.value.clone(),
+                from_module: resolver
+                    .canonical_module(i.from_module.value.as_str(), i.from_oid.as_deref())
+                    .to_string(),
             })
             .collect(),
         items,
@@ -559,7 +561,7 @@ fn lower_constraint(c: &cst::Constraint) -> IrConstraint {
     }
 }
 
-fn bound_to_int(b: &cst::ValueBound) -> Option<i64> {
+fn bound_to_int(b: &cst::ValueBound) -> Option<i128> {
     match b {
         cst::ValueBound::Min | cst::ValueBound::Max => None,
         cst::ValueBound::Value(v) => match v {
@@ -647,6 +649,10 @@ fn render_value(v: &cst::Value) -> String {
 struct Resolver<'a> {
     /// Maps module name -> set of type names defined there.
     module_types: HashMap<&'a str, Vec<&'a str>>,
+    /// Maps module name -> its `IMPORTS` clauses, used to follow re-export chains.
+    module_imports: HashMap<&'a str, &'a [cst::ImportClause]>,
+    /// Module OIDs as arc vectors, used for exact and successor matching.
+    module_oids: Vec<(Vec<i64>, &'a str)>,
     current_module: &'a str,
     /// Maps imported symbol name to its origin module.
     imports: HashMap<&'a str, &'a str>,
@@ -655,6 +661,8 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn new(modules: &'a [cst::Module]) -> Self {
         let mut module_types: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+        let mut module_imports: HashMap<&'a str, &'a [cst::ImportClause]> = HashMap::new();
+        let mut module_oids: Vec<(Vec<i64>, &'a str)> = Vec::new();
         for m in modules {
             let names: Vec<&str> = m
                 .assignments
@@ -663,16 +671,71 @@ impl<'a> Resolver<'a> {
                 .map(|a| a.name.value.as_str())
                 .collect();
             module_types.insert(m.name.value.as_str(), names);
+            module_imports.insert(m.name.value.as_str(), m.imports.as_slice());
+            if let Some(arcs) = m.oid.as_deref().and_then(numeric_oid) {
+                module_oids.push((arcs, m.name.value.as_str()));
+            }
         }
-        Self { module_types, current_module: "", imports: HashMap::new() }
+        Self {
+            module_types,
+            module_imports,
+            module_oids,
+            current_module: "",
+            imports: HashMap::new(),
+        }
+    }
+
+    /// Map the name used in an `IMPORTS ... FROM` clause onto a module that is
+    /// actually present in the program.
+    ///
+    /// Specifications in the wild sometimes cite a module under a different name
+    /// than the one in its header (`CITSapplMgmtApplReg` vs
+    /// `CITSapplMgmtApplReg2`) while quoting the very same object identifier, so
+    /// the OID is the more reliable key when the name misses. Failing that, a
+    /// module whose OID differs only in its trailing version arcs is accepted as
+    /// a successor (`ITS-Container {… 102894 cdd(2) version(2)}` is superseded by
+    /// `ETSI-ITS-CDD {… 102894 cdd(2) major-version-4(4) minor-version-3(3)}`).
+    fn canonical_module(&self, name: &'a str, oid: Option<&[cst::OidComponent]>) -> &'a str {
+        if self.module_types.contains_key(name) {
+            return name;
+        }
+        let Some(want) = oid.and_then(numeric_oid) else { return name };
+        if let Some((_, exact)) = self.module_oids.iter().find(|(arcs, _)| *arcs == want) {
+            return exact;
+        }
+        // Require everything but the version arcs to agree, so unrelated modules
+        // that merely share an issuing-body prefix are never conflated.
+        let min_shared = want.len().saturating_sub(2).max(3);
+        let mut best: Option<(usize, &'a str)> = None;
+        let mut ambiguous = false;
+        for (arcs, module) in &self.module_oids {
+            let shared = arcs.iter().zip(&want).take_while(|(a, b)| a == b).count();
+            if shared < min_shared {
+                continue;
+            }
+            match best {
+                Some((len, _)) if len > shared => {}
+                Some((len, m)) if len == shared && m != *module => ambiguous = true,
+                _ => {
+                    best = Some((shared, module));
+                    ambiguous = false;
+                }
+            }
+        }
+        match best {
+            Some((_, module)) if !ambiguous => module,
+            _ => name,
+        }
     }
 
     fn set_current(&mut self, name: &'a str, imports: &'a [cst::ImportClause]) {
         self.current_module = name;
         self.imports.clear();
         for imp in imports {
+            let origin =
+                self.canonical_module(imp.from_module.value.as_str(), imp.from_oid.as_deref());
             for sym in &imp.symbols {
-                self.imports.insert(sym.value.as_str(), imp.from_module.value.as_str());
+                self.imports.insert(sym.value.as_str(), origin);
             }
         }
     }
@@ -686,10 +749,45 @@ impl<'a> Resolver<'a> {
             }
         }
         if let Some(origin) = self.imports.get(name) {
-            return (Some(origin.to_string()), name.to_string());
+            return (Some(self.trace_symbol(origin, name).to_string()), name.to_string());
         }
         (None, name.to_string())
     }
+
+    /// Follow `IMPORTS` chains until the module that actually defines `name` is
+    /// found. A module that merely imports a symbol is commonly cited as its
+    /// source by downstream modules, so a single hop is not always enough.
+    /// Returns the last module reached when the chain dead-ends.
+    fn trace_symbol(&self, origin: &'a str, name: &str) -> &'a str {
+        let mut current = origin;
+        let mut seen = std::collections::HashSet::new();
+        while seen.insert(current) {
+            match self.module_types.get(current) {
+                Some(types) if types.contains(&name) => return current,
+                Some(_) => {}
+                None => break,
+            }
+            let Some(imports) = self.module_imports.get(current) else { break };
+            let Some(next) =
+                imports.iter().find(|imp| imp.symbols.iter().any(|s| s.value == name)).map(|imp| {
+                    self.canonical_module(imp.from_module.value.as_str(), imp.from_oid.as_deref())
+                })
+            else {
+                break;
+            };
+            current = next;
+        }
+        current
+    }
+}
+
+/// Render an object identifier as its numeric arcs, or `None` when any arc lacks
+/// a numeric value (`{iso standard}` style references).
+fn numeric_oid(comps: &[cst::OidComponent]) -> Option<Vec<i64>> {
+    if comps.is_empty() {
+        return None;
+    }
+    comps.iter().map(|c| c.value).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +1012,102 @@ mod tests {
             }
             _ => panic!("expected reference"),
         }
+    }
+
+    #[test]
+    fn import_resolves_by_oid_when_module_name_differs() {
+        let a = parse(
+            r#"RegistryV2 {iso(1) standard(0) reg(17419) applRegistry(2) version2(2)}
+            DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                ItsAid ::= INTEGER
+            END"#,
+        );
+        let b = parse(
+            r#"Client DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                IMPORTS ItsAid FROM Registry {iso(1) standard(0) reg(17419) applRegistry(2) version2(2)} ;
+                Info ::= SEQUENCE { aid ItsAid }
+            END"#,
+        );
+        let ir = lower(&[a, b]);
+        assert!(ir.diagnostics().is_empty(), "{:?}", ir.diagnostics());
+        let info = ir.find_type("Client", "Info").unwrap();
+        let IrType::Sequence(s) = &info.ty else { panic!() };
+        let IrStructMember::Field(f) = &s.members[0] else { panic!() };
+        let IrType::Reference { module, .. } = &f.ty else { panic!() };
+        assert_eq!(module.as_deref(), Some("RegistryV2"));
+    }
+
+    #[test]
+    fn import_resolves_to_successor_module_version() {
+        let a = parse(
+            r#"Cdd {itu-t(0) etsi(0) ts(102894) cdd(2) major-version-4(4) minor-version-3(3)}
+            DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                Latitude ::= INTEGER
+            END"#,
+        );
+        let b = parse(
+            r#"Client DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                IMPORTS Latitude FROM ITS-Container {itu-t(0) etsi(0) ts(102894) cdd(2) version(2)} ;
+                Pos ::= SEQUENCE { lat Latitude }
+            END"#,
+        );
+        let ir = lower(&[a, b]);
+        assert!(ir.diagnostics().is_empty(), "{:?}", ir.diagnostics());
+        let pos = ir.find_type("Client", "Pos").unwrap();
+        let IrType::Sequence(s) = &pos.ty else { panic!() };
+        let IrStructMember::Field(f) = &s.members[0] else { panic!() };
+        let IrType::Reference { module, .. } = &f.ty else { panic!() };
+        assert_eq!(module.as_deref(), Some("Cdd"));
+    }
+
+    #[test]
+    fn unrelated_oid_is_not_treated_as_successor() {
+        let a = parse(
+            r#"Cdd {itu-t(0) etsi(0) ts(102894) cdd(2) major-version-4(4)}
+            DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                Latitude ::= INTEGER
+            END"#,
+        );
+        let b = parse(
+            r#"Client DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                IMPORTS Area FROM Temp-Imports {itu-t(0) etsi(0) ts(103300) temp(255) version1(1)} ;
+                Shape ::= SEQUENCE { area Area }
+            END"#,
+        );
+        let ir = lower(&[a, b]);
+        let shape = ir.find_type("Client", "Shape").unwrap();
+        let IrType::Sequence(s) = &shape.ty else { panic!() };
+        let IrStructMember::Field(f) = &s.members[0] else { panic!() };
+        let IrType::Reference { module, .. } = &f.ty else { panic!() };
+        assert_eq!(module.as_deref(), Some("Temp-Imports"));
+    }
+
+    #[test]
+    fn reference_follows_reexport_chain_to_defining_module() {
+        let cdd = parse(
+            r#"Cdd DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                GenerationDeltaTime ::= INTEGER
+            END"#,
+        );
+        let cam = parse(
+            r#"Cam DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                IMPORTS GenerationDeltaTime FROM Cdd ;
+                Cam ::= SEQUENCE { t GenerationDeltaTime }
+            END"#,
+        );
+        let imzm = parse(
+            r#"Imzm DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+                IMPORTS GenerationDeltaTime FROM Cam ;
+                Msg ::= SEQUENCE { t GenerationDeltaTime }
+            END"#,
+        );
+        let ir = lower(&[cdd, cam, imzm]);
+        assert!(ir.diagnostics().is_empty(), "{:?}", ir.diagnostics());
+        let msg = ir.find_type("Imzm", "Msg").unwrap();
+        let IrType::Sequence(s) = &msg.ty else { panic!() };
+        let IrStructMember::Field(f) = &s.members[0] else { panic!() };
+        let IrType::Reference { module, .. } = &f.ty else { panic!() };
+        assert_eq!(module.as_deref(), Some("Cdd"));
     }
 
     #[test]

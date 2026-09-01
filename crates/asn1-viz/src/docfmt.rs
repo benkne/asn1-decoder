@@ -417,7 +417,7 @@ fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 
 fn chip(ui: &mut egui::Ui, label: &str, body: &str, accent: egui::Color32) {
     egui::Frame::none()
-        .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+        .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(6.0, 1.0))
         .fill(ui.visuals().faint_bg_color)

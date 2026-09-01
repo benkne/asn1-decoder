@@ -1,0 +1,13 @@
+# Normalize line endings so tooling behaves the same on every OS.
+# rustfmt.toml sets newline_style = "Unix"; without this, a Windows
+# checkout (core.autocrlf=true) produces CRLF and `cargo fmt --check`
+# fails locally even though CI (Linux) passes.
+* text=auto eol=lf
+
+# Binary / generated assets: never touch line endings.
+*.png binary
+*.jpg binary
+*.ico binary
+*.html -text
+*.der binary
+*.ber binary

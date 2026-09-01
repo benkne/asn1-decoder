@@ -206,7 +206,7 @@ pub struct NamedNumber {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum NamedNumberValue {
-    Literal(i64),
+    Literal(i128),
     Reference(Spanned<String>),
 }
 
@@ -215,7 +215,7 @@ pub enum NamedNumberValue {
 pub struct EnumItem {
     pub doc: Option<String>,
     pub name: Spanned<String>,
-    pub value: Option<i64>,
+    pub value: Option<i128>,
     pub span: Span,
 }
 
@@ -319,7 +319,7 @@ pub enum Presence {
 pub enum Value {
     Boolean(bool),
     Null,
-    Integer(i64),
+    Integer(i128),
     Real(f64),
     String(String),
     BString(String),

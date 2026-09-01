@@ -641,7 +641,7 @@ impl Parser {
             let value = match &self.peek().kind {
                 TokKind::Number(n) => {
                     let v = n
-                        .parse::<i64>()
+                        .parse::<i128>()
                         .map_err(|_| ParseError::new("bad integer literal", self.peek().span))?;
                     let v = if negative { -v } else { v };
                     self.bump();
@@ -726,12 +726,12 @@ impl Parser {
                 TokKind::Number(n) => {
                     let span = self.peek().span;
                     let v = if negative {
-                        // Try parsing with a leading minus sign to handle i64::MIN correctly.
+                        // Try parsing with a leading minus sign to handle i128::MIN correctly.
                         format!("-{}", n)
-                            .parse::<i64>()
+                            .parse::<i128>()
                             .map_err(|_| ParseError::new("bad enum value", span))?
                     } else {
-                        n.parse::<i64>().map_err(|_| ParseError::new("bad enum value", span))?
+                        n.parse::<i128>().map_err(|_| ParseError::new("bad enum value", span))?
                     };
                     self.bump();
                     Some(v)
@@ -1221,16 +1221,16 @@ impl Parser {
                 match &self.peek().kind {
                     TokKind::Number(n) => {
                         let span = self.peek().span;
-                        // When parsing a negative number, try to parse as a signed i64 first.
-                        // This handles the special case where -n fits in i64 but n (as unsigned)
-                        // is larger than i64::MAX, e.g., -(2^63) = -9223372036854775808.
+                        // When parsing a negative number, try to parse as a signed i128 first.
+                        // This handles the special case where -n fits in i128 but n (as unsigned)
+                        // is larger than i128::MAX.
                         let v = if negative {
                             // Try parsing with a leading minus sign.
                             format!("-{}", n)
-                                .parse::<i64>()
+                                .parse::<i128>()
                                 .map_err(|_| ParseError::new("bad integer literal", span))?
                         } else {
-                            n.parse::<i64>()
+                            n.parse::<i128>()
                                 .map_err(|_| ParseError::new("bad integer literal", span))?
                         };
                         self.bump();
@@ -1567,7 +1567,7 @@ impl Parser {
             if matches!(self.peek().kind, TokKind::Ellipsis) {
                 self.bump();
                 extensible = true;
-                if matches!(self.peek().kind, TokKind::Comma) {
+                if matches!(self.peek().kind, TokKind::Comma | TokKind::Pipe | TokKind::Caret) {
                     self.bump();
                     continue;
                 }
@@ -1581,7 +1581,13 @@ impl Parser {
                 ObjectSetElement::Reference(r)
             };
             elements.push(el);
-            if matches!(self.peek().kind, TokKind::Comma) {
+            // Elements may be separated by `,` or by a set-arithmetic operator
+            // (`|`/`UNION`, `^`/`INTERSECTION`). We flatten unions into the
+            // element list because the IR treats an object set as a flat set.
+            if matches!(self.peek().kind, TokKind::Comma | TokKind::Pipe | TokKind::Caret)
+                || self.peek_ident_is("UNION")
+                || self.peek_ident_is("INTERSECTION")
+            {
                 self.bump();
                 continue;
             }

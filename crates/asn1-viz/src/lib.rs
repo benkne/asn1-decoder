@@ -58,7 +58,7 @@ pub(crate) fn describe_constraint(c: &IrConstraint) -> (&'static str, String) {
     }
 }
 
-fn format_range(lower: Option<i64>, upper: Option<i64>, extensible: bool) -> String {
+fn format_range(lower: Option<i128>, upper: Option<i128>, extensible: bool) -> String {
     let ext = if extensible { ", …" } else { "" };
     match (lower, upper) {
         (Some(l), Some(u)) => format!("{l} … {u}{ext}"),

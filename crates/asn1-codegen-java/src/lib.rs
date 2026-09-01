@@ -282,6 +282,8 @@ fn java_type_for(ty: &IrType, resolver: &ClassResolver<'_>) -> (String, bool) {
         IrType::Integer { constraints, .. } => {
             if integer_fits_int(constraints) {
                 ("int".into(), false)
+            } else if integer_needs_big(constraints) {
+                ("java.math.BigInteger".into(), false)
             } else {
                 ("long".into(), false)
             }
@@ -334,14 +336,26 @@ fn wrap_optional(t: &str) -> String {
 fn integer_fits_int(cs: &[IrConstraint]) -> bool {
     for c in cs {
         if let IrConstraint::Range { lower, upper, .. } = c {
-            let lo = lower.unwrap_or(i64::MIN);
-            let hi = upper.unwrap_or(i64::MAX);
-            if lo >= i32::MIN as i64 && hi <= i32::MAX as i64 {
+            let lo = lower.unwrap_or(i64::MIN as i128);
+            let hi = upper.unwrap_or(i64::MAX as i128);
+            if lo >= i32::MIN as i128 && hi <= i32::MAX as i128 {
                 return true;
             }
         }
     }
     false
+}
+
+/// True when a declared range cannot be represented by a Java `long`, in which
+/// case the field is emitted as `java.math.BigInteger`.
+fn integer_needs_big(cs: &[IrConstraint]) -> bool {
+    cs.iter().any(|c| match c {
+        IrConstraint::Range { lower, upper, .. } => {
+            lower.is_some_and(|lo| lo < i64::MIN as i128)
+                || upper.is_some_and(|hi| hi > i64::MAX as i128)
+        }
+        _ => false,
+    })
 }
 
 fn char_string_java_type(_k: IrCharKind) -> String {
